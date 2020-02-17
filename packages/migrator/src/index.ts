@@ -36,7 +36,7 @@ export const setupSlonikMigrator = ({
   mainModule,
 }: SlonikMigratorOptions) => {
   const log: typeof _log = memoize((...args: any[]) => {
-    if (args[0] === 'File: down does not match pattern: /\\.sql$/') {
+    if (args[0] === 'File: down does not match pattern: /\\.(sql|ts|js)$/') {
       // workaround until release of https://github.com/sequelize/umzug/pull/190
       return
     }
@@ -64,14 +64,32 @@ export const setupSlonikMigrator = ({
     logging: log,
     migrations: {
       path: migrationsPath,
-      pattern: /\.sql$/,
-      customResolver: path => ({
-        up: () => slonik.query(sql`${raw(readFileSync(path, 'utf8'))}`),
-        down: async () => {
-          const downPath = join(dirname(path), 'down', basename(path))
-          await slonik.query(sql`${raw(readFileSync(downPath, 'utf8'))}`)
-        },
-      }),
+      pattern: /\.(sql|ts|js)$/,
+      customResolver: (path: string) => {
+        // SQL files are expected to have down files in a down directory
+        if (path.endsWith('.sql')) {
+          return {
+            up: () => slonik.query(sql`${raw(readFileSync(path, 'utf8'))}`),
+            down: async () => {
+              const downPath = join(dirname(path), 'down', basename(path))
+              await slonik.query(sql`${raw(readFileSync(downPath, 'utf8'))}`)
+            },
+          }
+        }
+        // otherwise it's a ts or js file, so import it, expect it to export up and down SQL templates
+        const migrationModule = require(path)
+        if (!migrationModule.up || !migrationModule.down) {
+          log(`Warning: Migration file ${path} requires up and down exports to be SQL template literals`)
+          // TODO - what's the right way to bail out?
+          throw Error(`Migration file ${path} missing up and/or down exports`)
+        }
+        return {
+          up: () => slonik.query(migrationModule.up),
+          down: async () => {
+            await slonik.query(migrationModule.down)
+          },
+        }
+      },
     },
     storage: {
       async executed() {
